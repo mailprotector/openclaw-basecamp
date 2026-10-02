@@ -15,6 +15,7 @@ import {
   normalizeWebhookPayload,
   parseBucketIdFromUrl,
   parseRecordingIdFromIdentifier,
+  recordableTypeFromAppUrl,
   resolveBasecampPeer,
   resolveParentPeer,
 } from "../src/inbound/normalize.js";
@@ -1062,5 +1063,114 @@ describe("unknown kind drop policy", () => {
 
     expect(msg).not.toBeNull();
     expect(msg!.meta.recordableType).toBe("Upload");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Readings entries the API sends for @mentions and Campfires
+// ---------------------------------------------------------------------------
+
+describe("recordableTypeFromAppUrl", () => {
+  it("treats a #__recording_ fragment as a comment", () => {
+    expect(recordableTypeFromAppUrl("https://app.basecamp.com/1/buckets/42/messages/100#__recording_200")).toBe("Comment");
+  });
+
+  it("maps the resource segment otherwise", () => {
+    expect(recordableTypeFromAppUrl("https://app.basecamp.com/1/buckets/42/messages/100")).toBe("Message");
+    expect(recordableTypeFromAppUrl("https://app.basecamp.com/1/buckets/42/chats/300")).toBe("Chat::Transcript");
+    expect(recordableTypeFromAppUrl("https://app.basecamp.com/1/buckets/42/card_tables/cards/7")).toBe("Kanban::Card");
+    expect(recordableTypeFromAppUrl("https://app.basecamp.com/1/buckets/42/todos/9")).toBe("Todo");
+    expect(recordableTypeFromAppUrl("https://app.basecamp.com/1/projects/42/gauge/needles/1")).toBeUndefined();
+  });
+});
+
+describe("parseRecordingIdFromIdentifier (base64 gid)", () => {
+  it("decodes the base64 gid the readings feed sends", () => {
+    const identifier = Buffer.from("gid://bc3/Recording/10319572524").toString("base64").replace(/=+$/, "");
+    expect(parseRecordingIdFromIdentifier(identifier)).toBe("10319572524");
+  });
+});
+
+describe("normalizeReadingsEvent (Mention and Chat entries)", () => {
+  it("normalizes a Mention entry for a comment as a comment that mentions the agent", () => {
+    const raw = makeReadingsEntry({
+      type: "Mention",
+      section: "inbox",
+      app_url: "https://app.basecamp.com/1/buckets/42/messages/100#__recording_200",
+      title: "@mentioned you in: Re: queue backlog",
+      content_excerpt: "Dan Atlas",
+    } as Partial<BasecampReadingsEntry>);
+    const msg = normalizeReadingsEvent(raw, mockAccount);
+
+    expect(msg).not.toBeNull();
+    expect(msg!.meta.recordableType).toBe("Comment");
+    expect(msg!.meta.mentionsAgent).toBe(true);
+    expect(msg!.meta.bucketId).toBe("42");
+  });
+
+  it("normalizes a Mention entry for a message as a message that mentions the agent", () => {
+    const raw = makeReadingsEntry({
+      type: "Mention",
+      section: "inbox",
+      app_url: "https://app.basecamp.com/1/buckets/42/messages/100",
+      title: "@mentioned you in: Cyclops mention test",
+      content_excerpt: "which AWS account are you running in?",
+    } as Partial<BasecampReadingsEntry>);
+    const msg = normalizeReadingsEvent(raw, mockAccount);
+
+    expect(msg).not.toBeNull();
+    expect(msg!.meta.recordableType).toBe("Message");
+    expect(msg!.meta.recordingId).toBe("100");
+    expect(msg!.meta.mentionsAgent).toBe(true);
+  });
+
+  it("treats a Circle URL as a Ping (dm peer) regardless of the reported type", () => {
+    const raw = makeReadingsEntry({
+      type: "Chat",
+      section: "chats",
+      app_url: "https://app.basecamp.com/1/circles/44024535@9927050443",
+      title: "Dan Wagoner",
+      content_excerpt: "which AWS account are you running in?",
+      participants: [{ id: 29604296, name: "Dan Wagoner" }],
+    } as Partial<BasecampReadingsEntry>);
+    const msg = normalizeReadingsEvent(raw, mockAccount);
+
+    expect(msg).not.toBeNull();
+    expect(msg!.meta.recordableType).toBe("Chat::Transcript");
+    expect(msg!.peer).toEqual({ kind: "dm", id: "ping:44024535" });
+  });
+
+  it("gives each new Ping line its own dedup key even though the readings id is constant", () => {
+    const base = {
+      id: 777,
+      type: "Chat",
+      section: "pings",
+      app_url: "https://app.basecamp.com/1/circles/49077941",
+      readable_identifier: Buffer.from("gid://bc3/Recording/10353568412").toString("base64").replace(/=+$/, ""),
+      participants: [{ id: 29604296, name: "Dan Wagoner" }],
+    } as Partial<BasecampReadingsEntry>;
+    const first = normalizeReadingsEvent(makeReadingsEntry({ ...base, unread_at: "2026-09-30T19:22:00Z" } as Partial<BasecampReadingsEntry>), mockAccount);
+    const second = normalizeReadingsEvent(makeReadingsEntry({ ...base, unread_at: "2026-09-30T19:35:53Z" } as Partial<BasecampReadingsEntry>), mockAccount);
+
+    expect(first!.dedupKey).toBe("reading:777:2026-09-30T19:22:00Z");
+    expect(second!.dedupKey).toBe("reading:777:2026-09-30T19:35:53Z");
+    expect(first!.dedupKey).not.toBe(second!.dedupKey);
+    expect(first!.meta.messageId).toBe("10353568412:2026-09-30T19:22:00Z");
+    expect(second!.meta.messageId).toBe("10353568412:2026-09-30T19:35:53Z");
+  });
+
+  it("normalizes a Campfire (Chat) entry as a chat transcript", () => {
+    const raw = makeReadingsEntry({
+      type: "Chat",
+      section: "chats",
+      app_url: "https://app.basecamp.com/1/buckets/42/chats/300",
+      title: "Deploys",
+      content_excerpt: "Production deploy #360 succeeded",
+    } as Partial<BasecampReadingsEntry>);
+    const msg = normalizeReadingsEvent(raw, mockAccount);
+
+    expect(msg).not.toBeNull();
+    expect(msg!.meta.recordableType).toBe("Chat::Transcript");
+    expect(msg!.meta.recordingId).toBe("300");
   });
 });

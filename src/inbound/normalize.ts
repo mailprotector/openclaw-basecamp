@@ -151,6 +151,8 @@ const READINGS_TYPE_MAP: Record<string, BasecampRecordableType> = {
   Upload: "Upload",
   Comment: "Comment",
   ScheduleEntry: "Schedule::Entry",
+  // Campfire unreads (section "chats") report the transcript itself.
+  Chat: "Chat::Transcript",
 };
 
 function normalizeRecordingType(type: string): BasecampRecordableType | undefined {
@@ -211,7 +213,51 @@ export function parseRecordingIdFromUrl(url: string): string | undefined {
 /** Extract recording ID from a readable_identifier (e.g., "Comment/123"). */
 export function parseRecordingIdFromIdentifier(identifier: string): string | undefined {
   const match = /\/(\d+)$/.exec(identifier);
-  return match ? match[1] : undefined;
+  if (match) return match[1];
+  // Readings entries carry a base64-encoded gid ("gid://bc3/Recording/123").
+  const decoded = Buffer.from(identifier, "base64").toString("utf8");
+  const decodedMatch = /^gid:\/\/bc3\/\w+\/(\d+)$/.exec(decoded);
+  return decodedMatch ? decodedMatch[1] : undefined;
+}
+
+/**
+ * Derive the recordable type from an app_url. Readings entries of type "Mention"
+ * ("@mentioned you in: …") describe the mention rather than the recording, so the
+ * recording type has to come from the URL. A `#__recording_<id>` fragment means the
+ * mention lives in a comment on the linked recording.
+ */
+export function recordableTypeFromAppUrl(url: string): BasecampRecordableType | undefined {
+  if (/#__recording_\d+/.test(url)) return "Comment";
+  const match =
+    /\/(messages|todos|todolists|chats|card_tables\/cards|documents|uploads|questions\/answers|questions|schedule_entries|vaults)\/\d+/.exec(
+      url,
+    );
+  switch (match?.[1]) {
+    case "messages":
+      return "Message";
+    case "todos":
+      return "Todo";
+    case "todolists":
+      return "Todolist";
+    case "chats":
+      return "Chat::Transcript";
+    case "card_tables/cards":
+      return "Kanban::Card";
+    case "documents":
+      return "Document";
+    case "uploads":
+      return "Upload";
+    case "questions/answers":
+      return "Question::Answer";
+    case "questions":
+      return "Question";
+    case "schedule_entries":
+      return "Schedule::Entry";
+    case "vaults":
+      return "Vault";
+    default:
+      return undefined;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -458,7 +504,15 @@ export function normalizeReadingsEvent(
     recordingId = String(raw.id);
   }
 
-  const recordableType = normalizeRecordingType(raw.type);
+  // "Mention" entries ("@mentioned you in: …") carry no recording type of their own.
+  const isMentionEntry = raw.type === "Mention";
+  // Pings live in Circle buckets (/circles/<id> URLs) whatever type the feed reports.
+  const isPing = raw.type === "Ping" || raw.app_url?.includes("/circles/") === true;
+  const recordableType = isPing
+    ? "Chat::Transcript"
+    : isMentionEntry && raw.app_url
+      ? recordableTypeFromAppUrl(raw.app_url)
+      : normalizeRecordingType(raw.type);
 
   // Unknown type → drop with metric rather than misclassifying as Document
   if (!recordableType) {
@@ -466,7 +520,6 @@ export function normalizeReadingsEvent(
     return null;
   }
 
-  const isPing = raw.type === "Ping";
   // readings participants uses other_circle_people() which excludes the caller — add 1.
   const participantCount = raw.participants ? raw.participants.length + 1 : undefined;
 
@@ -474,7 +527,8 @@ export function normalizeReadingsEvent(
   const html = raw.content_excerpt ?? "";
 
   const sgids = extractAttachmentSgids(html);
-  const isAgentMentioned = mentionsAgent(html, account.attachableSgid, account.personId) || raw.section === "mentions";
+  const isAgentMentioned =
+    isMentionEntry || mentionsAgent(html, account.attachableSgid, account.personId) || raw.section === "mentions";
 
   const sender: BasecampSender = raw.creator
     ? {
@@ -509,8 +563,18 @@ export function normalizeReadingsEvent(
     })),
     sources: ["readings"],
   };
+  // Every line in a Ping or Campfire arrives under the transcript's id, and the host
+  // de-duplicates inbound messages by messageId; give each unread its own id.
+  if (recordableType === "Chat::Transcript") {
+    meta.messageId = `${recordingId}:${raw.unread_at ?? raw.created_at}`;
+  }
 
-  const dedupPrimary = replayPrimaryKey("reading", String(raw.id));
+  // A transcript (Ping or Campfire) keeps one readings id for its whole life, so every new
+  // line would collapse onto the first one seen. Key those on the unread timestamp too.
+  const dedupPrimary = replayPrimaryKey(
+    "reading",
+    recordableType === "Chat::Transcript" ? `${raw.id}:${raw.unread_at ?? raw.created_at}` : String(raw.id),
+  );
 
   return {
     channel: "basecamp",
