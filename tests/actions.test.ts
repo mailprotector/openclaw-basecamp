@@ -30,6 +30,7 @@ vi.mock("../src/basecamp-client.js", () => ({
 vi.mock("../src/outbound/send.js", () => ({
   postCampfireLine: vi.fn(),
   postComment: vi.fn(),
+  sendBasecampText: vi.fn(),
 }));
 
 vi.mock("../src/outbound/format.js", () => ({
@@ -51,7 +52,7 @@ vi.mock("../src/config.js", () => ({
 import { basecampActionsAdapter } from "../src/adapters/actions.js";
 import { resolveBasecampAccount } from "../src/config.js";
 import { markdownToBasecampHtml } from "../src/outbound/format.js";
-import { postCampfireLine, postComment } from "../src/outbound/send.js";
+import { postCampfireLine, postComment, sendBasecampText } from "../src/outbound/send.js";
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -75,6 +76,68 @@ function actionCtx(overrides: Record<string, unknown> = {}) {
 function resultPayload(result: unknown): unknown {
   return (result as { details: unknown }).details;
 }
+
+// ---------------------------------------------------------------------------
+// handleAction — send by outbound target (the shared `message` tool shape)
+// ---------------------------------------------------------------------------
+
+describe("actions.handleAction — send by outbound target", () => {
+  it("delivers through sendBasecampText when `to` carries a target", async () => {
+    vi.mocked(sendBasecampText).mockResolvedValue({
+      messageId: "88",
+      target: { kind: "conversation", id: "recording:3" },
+    });
+
+    const result = await basecampActionsAdapter.handleAction!(
+      actionCtx({ params: { to: "bucket:1/recording:3", message: "Hi there" } }),
+    );
+
+    expect(resultPayload(result)).toEqual({ ok: true, target: "recording:3", messageId: "88" });
+    expect(sendBasecampText).toHaveBeenCalledWith({
+      cfg: expect.anything(),
+      to: "bucket:1/recording:3",
+      text: "Hi there",
+      accountId: "test-acct",
+    });
+    expect(postComment).not.toHaveBeenCalled();
+    expect(postCampfireLine).not.toHaveBeenCalled();
+  });
+
+  it("accepts `target` as the key and surfaces resolver errors as ok:false", async () => {
+    vi.mocked(sendBasecampText).mockRejectedValue(new Error("Unknown recording 3"));
+
+    const result = await basecampActionsAdapter.handleAction!(
+      actionCtx({ params: { target: "recording:3", message: "Hi" } }),
+    );
+
+    expect(resultPayload(result)).toEqual({ ok: false, target: "recording:3", error: "Unknown recording 3" });
+  });
+
+  it("previews without sending on dryRun", async () => {
+    const result = await basecampActionsAdapter.handleAction!(
+      actionCtx({ dryRun: true, params: { to: "recording:3", message: "Preview me" } }),
+    );
+
+    expect(resultPayload(result)).toEqual({
+      ok: true,
+      dryRun: true,
+      target: "recording:3",
+      contentPreview: "<p>Preview me</p>",
+    });
+    expect(sendBasecampText).not.toHaveBeenCalled();
+  });
+
+  it("keeps the ids form when bucketId is given alongside a target", async () => {
+    vi.mocked(postComment).mockResolvedValue({ ok: true, commentId: "91" });
+
+    const result = await basecampActionsAdapter.handleAction!(
+      actionCtx({ params: { to: "recording:3", bucketId: "1", recordingId: "3", text: "Ids win" } }),
+    );
+
+    expect(resultPayload(result)).toEqual({ ok: true, target: "comment", commentId: "91" });
+    expect(sendBasecampText).not.toHaveBeenCalled();
+  });
+});
 
 // ---------------------------------------------------------------------------
 // describeMessageTool

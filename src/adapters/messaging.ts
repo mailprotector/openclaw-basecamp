@@ -13,14 +13,22 @@ import { findRecordingEntrySync } from "../inbound/recording-index.js";
 import type { ChannelMessagingAdapter } from "../sdk-types.js";
 
 const PEER_PATTERN = /^(recording|bucket|ping):\d+$/;
+/** Cold send: a recording with its bucket spelled out, for recordings the inbound fabric has not seen. */
+const COLD_PATTERN = /^bucket:\d+\/recording:\d+$/;
 
 /** Normalize a raw target to canonical peer form, or undefined when invalid. */
 function normalizeBasecampTarget(raw: string): string | undefined {
   const stripped = stripChannelTargetPrefix(raw.trim(), "basecamp", "bc");
-  if (PEER_PATTERN.test(stripped)) return stripped;
+  if (PEER_PATTERN.test(stripped) || COLD_PATTERN.test(stripped)) return stripped;
   // Bare numeric → recording:<id>
   if (/^\d+$/.test(stripped)) return `recording:${stripped}`;
   return undefined;
+}
+
+/** Session peer for a target: a cold `bucket:<b>/recording:<r>` routes as its recording. */
+function peerIdFor(normalized: string): string {
+  const cold = /^bucket:\d+\/(recording:\d+)$/.exec(normalized);
+  return cold ? cold[1]! : normalized;
 }
 
 /**
@@ -61,6 +69,15 @@ export const basecampMessagingAdapter: ChannelMessagingAdapter = {
    */
   resolveSessionConversation: ({ rawId }) => {
     const normalized = normalizeBasecampTarget(rawId) ?? rawId;
+    const cold = /^bucket:(\d+)\/recording:(\d+)$/.exec(normalized);
+    if (cold) {
+      const bucketConversationId = `bucket:${cold[1]}`;
+      return {
+        id: `recording:${cold[2]}`,
+        baseConversationId: bucketConversationId,
+        parentConversationCandidates: [bucketConversationId],
+      };
+    }
     const match = normalized.match(/^recording:(\d+)$/);
     if (!match) return { id: normalized };
 
@@ -81,6 +98,8 @@ export const basecampMessagingAdapter: ChannelMessagingAdapter = {
   },
 
   formatTargetDisplay: ({ target }) => {
+    const cold = /^bucket:(\d+)\/recording:(\d+)$/.exec(target);
+    if (cold) return `Recording ${cold[2]} in project ${cold[1]}`;
     const match = target.match(/^(recording|bucket|ping):(\d+)$/);
     if (!match) return target;
 
@@ -106,6 +125,7 @@ export const basecampMessagingAdapter: ChannelMessagingAdapter = {
     const normalized = normalizeBasecampTarget(target);
     if (!normalized) return null;
 
+    const peerId = peerIdFor(normalized);
     const chatType = normalized.startsWith("ping:") ? pingChatKind(normalized) : ("group" as const);
     return buildChannelOutboundSessionRoute({
       cfg,
@@ -113,9 +133,9 @@ export const basecampMessagingAdapter: ChannelMessagingAdapter = {
       channel: "basecamp",
       accountId,
       recipientSessionExact: true,
-      peer: { kind: chatType, id: normalized },
+      peer: { kind: chatType, id: peerId },
       chatType,
-      from: `basecamp:${normalized}`,
+      from: `basecamp:${peerId}`,
       to: normalized,
     });
   },

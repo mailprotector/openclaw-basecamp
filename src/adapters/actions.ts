@@ -18,7 +18,7 @@ import type { ChannelToolSend } from "openclaw/plugin-sdk/tool-send";
 import { getClient, numId } from "../basecamp-client.js";
 import { resolveBasecampAccount } from "../config.js";
 import { markdownToBasecampHtml } from "../outbound/format.js";
-import { postCampfireLine, postComment } from "../outbound/send.js";
+import { postCampfireLine, postComment, sendBasecampText } from "../outbound/send.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -89,8 +89,29 @@ export const basecampActionsAdapter: ChannelMessageActionAdapter = {
 async function handleSend(ctx: ChannelMessageActionContext) {
   const { params, cfg, accountId, dryRun } = ctx;
 
+  // The shared `message` tool and `openclaw message send` carry the outbound target grammar
+  // (`recording:<id>`, `bucket:<id>/recording:<id>`, `bucket:<id>`, `ping:<id>`) in `to` or
+  // `target` and the body in `message`; the ids form below is what direct callers pass. The
+  // core never forwards bucketId, so without this branch every tool send failed with
+  // "Bucket ID required". Delivery goes through the same resolver cron announcements use.
+  const to = readStringParam(params, "to") ?? readStringParam(params, "target");
+  if (to && !readStringParam(params, "bucketId")) {
+    const body =
+      readStringParam(params, "text") ?? readStringParam(params, "message", { required: true, label: "Message text" });
+    if (dryRun) {
+      return jsonResult({ ok: true, dryRun: true, target: to, contentPreview: markdownToBasecampHtml(body).slice(0, 200) });
+    }
+    try {
+      const delivered = await sendBasecampText({ cfg, to, text: body, accountId });
+      return jsonResult({ ok: true, target: delivered.target.id, messageId: delivered.messageId });
+    } catch (err) {
+      return jsonResult({ ok: false, target: to, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+
   const bucketId = readStringParam(params, "bucketId", { required: true, label: "Bucket ID" });
-  const text = readStringParam(params, "text", { required: true, label: "Message text" });
+  const text =
+    readStringParam(params, "text") ?? readStringParam(params, "message", { required: true, label: "Message text" });
   const transcriptId = readStringParam(params, "transcriptId");
   const recordingId = readStringParam(params, "recordingId");
 
