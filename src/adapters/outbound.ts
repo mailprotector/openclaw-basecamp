@@ -32,8 +32,16 @@ export type ParsedOutboundTarget =
   | { kind: "ping"; bucketId: string }
   | { kind: "bucket"; bucketId: string };
 
-/** Parse an outbound target string. Undefined when the grammar does not match. */
-export function parseOutboundTarget(to: string): ParsedOutboundTarget | undefined {
+/**
+ * Parse an outbound target string. Undefined when the grammar does not match.
+ *
+ * A leading channel qualifier (`basecamp:` or `bc:`) is accepted. Subagent
+ * completions and other announce routes record the requester as
+ * `basecamp:ping:<id>`; rejecting that form left finished work undeliverable
+ * and the completion retrying forever.
+ */
+export function parseOutboundTarget(rawTo: string): ParsedOutboundTarget | undefined {
+  const to = rawTo.trim().replace(/^(?:basecamp|bc):(?=(?:recording|ping|bucket):)/i, "");
   const cold = /^bucket:(\d+)\/recording:(\d+)$/.exec(to);
   if (cold) return { kind: "recording", recordingId: cold[2]!, bucketId: cold[1]! };
   const simple = /^(recording|ping|bucket):(\d+)$/.exec(to);

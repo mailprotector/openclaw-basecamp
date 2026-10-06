@@ -135,6 +135,27 @@ describe("outbound.parseOutboundTarget", () => {
   });
 });
 
+describe("outbound.parseOutboundTarget — channel-qualified targets", () => {
+  it("strips a basecamp: or bc: qualifier (subagent completion routes)", () => {
+    expect(parseOutboundTarget("basecamp:ping:456")).toEqual({ kind: "ping", bucketId: "456" });
+    expect(parseOutboundTarget("bc:recording:123")).toEqual({ kind: "recording", recordingId: "123" });
+    expect(parseOutboundTarget("basecamp:bucket:1/recording:2")).toEqual({
+      kind: "recording",
+      recordingId: "2",
+      bucketId: "1",
+    });
+  });
+
+  it("keeps rejecting other channels and malformed qualifiers", () => {
+    expect(parseOutboundTarget("slack:ping:456")).toBeUndefined();
+    expect(parseOutboundTarget("basecamp:hello")).toBeUndefined();
+  });
+
+  it("validates qualified targets for direct sends", () => {
+    expect(resolveOutboundTarget("basecamp:ping:456")).toEqual({ ok: true, to: "basecamp:ping:456" });
+  });
+});
+
 describe("outbound.resolveTarget", () => {
   it("accepts all four target forms", () => {
     for (const to of ["recording:123", "ping:456", "bucket:789", "bucket:1/recording:2"]) {
