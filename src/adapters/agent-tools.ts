@@ -38,6 +38,7 @@ import { Type } from "typebox";
 import type { BasecampClient } from "../basecamp-client.js";
 import { getClient, numId, rawOrThrow } from "../basecamp-client.js";
 import { resolveBasecampAccount, resolveDefaultBasecampAccountId, resolvePersonaAccountId } from "../config.js";
+import { uploadAttachments } from "../outbound/attachments.js";
 import { basecampHtmlToPlainText } from "../outbound/format.js";
 import { BASECAMP_TOOL_NAMES, type BasecampToolName } from "../tools/catalog.js";
 import type { ResolvedBasecampAccount } from "../types.js";
@@ -106,6 +107,13 @@ const PostMessageParams = Type.Object({
   subject: Type.String({ description: "Message subject/title" }),
   content: Type.Optional(Type.String({ description: "Message body content (Basecamp HTML or plain text)" })),
   categoryId: Type.Optional(Type.Number({ description: "Message type/category ID" })),
+  attachmentPaths: Type.Optional(
+    Type.Array(Type.String(), {
+      description:
+        "Absolute paths of files to attach at the end of the post (e.g. a report a tool wrote). " +
+        "Only files in the gateway's allowed attachment directories can be attached.",
+    }),
+  ),
 });
 
 const AnswerCheckinParams = Type.Object({
@@ -455,11 +463,15 @@ export function buildBasecampTools(ctx: OpenClawPluginToolContext): AnyAgentTool
       description:
         "Post a new message to a Basecamp message board. " +
         "Requires the project (bucket) ID, message board ID, and subject. " +
-        "Optionally include body content and a message category/type ID.",
+        "Optionally include body content, a message category/type ID, and files to attach.",
       parameters: PostMessageParams,
-      run: async (client, { messageBoardId, subject, content, categoryId }) => {
-        const result = await client.messages.create(numId("board", messageBoardId), { subject, content, categoryId });
-        return toolOk({ messageId: result.id, subject: result.subject });
+      run: async (client, { messageBoardId, subject, content, categoryId, attachmentPaths }) => {
+        const boardId = numId("board", messageBoardId);
+        // Upload before posting, so a refused or failed attachment leaves nothing half-posted.
+        const tags = attachmentPaths?.length ? await uploadAttachments(client, attachmentPaths) : [];
+        const body = tags.length ? [content, ...tags].filter(Boolean).join("<br>") : content;
+        const result = await client.messages.create(boardId, { subject, content: body, categoryId });
+        return toolOk({ messageId: result.id, subject: result.subject, attachments: tags.length || undefined });
       },
     }),
 

@@ -20,6 +20,7 @@ import { getRecordingIndex } from "../inbound/recording-index.js";
 import { isRetryableError, withCircuitBreaker, withRetry } from "../retry.js";
 import type { BasecampRecordableType, ResolvedBasecampAccount } from "../types.js";
 import { markdownToBasecampHtml } from "./format.js";
+import { mediaNameAndType } from "./media-types.js";
 
 // ---------------------------------------------------------------------------
 // Circle info cache — LRU-bounded to avoid unbounded growth.
@@ -568,31 +569,6 @@ export async function sendBasecampText(params: {
 // ---------------------------------------------------------------------------
 // Media
 // ---------------------------------------------------------------------------
-
-const MEDIA_CONTENT_TYPES: Record<string, string> = {
-  png: "image/png",
-  jpg: "image/jpeg",
-  jpeg: "image/jpeg",
-  gif: "image/gif",
-  webp: "image/webp",
-  svg: "image/svg+xml",
-  pdf: "application/pdf",
-  mp4: "video/mp4",
-  mov: "video/quicktime",
-  mp3: "audio/mpeg",
-  wav: "audio/wav",
-  ogg: "audio/ogg",
-  txt: "text/plain",
-  json: "application/json",
-  zip: "application/zip",
-};
-
-function mediaNameAndType(mediaUrl: string): { name: string; contentType: string } {
-  const path = /^https?:\/\//.test(mediaUrl) ? new URL(mediaUrl).pathname : mediaUrl;
-  const name = path.split("/").filter(Boolean).pop() || "attachment";
-  const ext = name.includes(".") ? name.split(".").pop()!.toLowerCase() : "";
-  return { name, contentType: MEDIA_CONTENT_TYPES[ext] ?? "application/octet-stream" };
-}
 
 /** Default remote-media cap when the account sets no mediaMaxMb. */
 const DEFAULT_MEDIA_MAX_MB = 25;

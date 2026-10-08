@@ -1,5 +1,8 @@
+import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import type { OpenClawPluginToolContext } from "openclaw/plugin-sdk/plugin-entry";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cfgWithAccounts } from "./helpers.js";
 
 const mockClient = {
@@ -7,6 +10,7 @@ const mockClient = {
   boosts: { createForRecording: vi.fn() },
   cards: { move: vi.fn() },
   messages: { create: vi.fn() },
+  attachments: { create: vi.fn() },
   checkins: { createAnswer: vi.fn() },
   raw: {
     GET: vi.fn(),
@@ -588,6 +592,105 @@ describe("basecamp_post_message", () => {
     const result = await tool.execute("call-26", { bucketId: "100", messageBoardId: "200", subject: "Fail" });
 
     expect(result.details).toEqual({ ok: false, error: expect.stringContaining("403 Forbidden") });
+  });
+
+  describe("attachments", () => {
+    let root: string;
+    let outside: string;
+    const saved = process.env.OPENCLAW_BASECAMP_ATTACHMENT_ROOTS;
+
+    beforeEach(async () => {
+      root = await mkdtemp(path.join(tmpdir(), "bc-attach-"));
+      outside = await mkdtemp(path.join(tmpdir(), "bc-outside-"));
+      await writeFile(path.join(root, "Infrastructure Cost 2026-10.xlsx"), "xlsx-bytes");
+      await writeFile(path.join(outside, "secret.env"), "TOKEN=1");
+      process.env.OPENCLAW_BASECAMP_ATTACHMENT_ROOTS = root;
+    });
+
+    afterEach(async () => {
+      if (saved === undefined) delete process.env.OPENCLAW_BASECAMP_ATTACHMENT_ROOTS;
+      else process.env.OPENCLAW_BASECAMP_ATTACHMENT_ROOTS = saved;
+      await rm(root, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
+    });
+
+    it("uploads an allowed file and embeds it after the body", async () => {
+      mockClient.attachments.create.mockResolvedValue({ attachable_sgid: "sgid-1" });
+      mockClient.messages.create.mockResolvedValue({ id: 802, subject: "Costs" });
+
+      const result = await tool.execute("call-27", {
+        bucketId: "100",
+        messageBoardId: "200",
+        subject: "Costs",
+        content: "<p>Summary</p>",
+        attachmentPaths: [path.join(root, "Infrastructure Cost 2026-10.xlsx")],
+      });
+
+      expect(mockClient.attachments.create).toHaveBeenCalledWith(
+        expect.any(Uint8Array),
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "Infrastructure Cost 2026-10.xlsx",
+      );
+      expect(mockClient.messages.create).toHaveBeenCalledWith(200, {
+        subject: "Costs",
+        content:
+          '<p>Summary</p><br><bc-attachment sgid="sgid-1" content-type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" filename="Infrastructure Cost 2026-10.xlsx"></bc-attachment>',
+        categoryId: undefined,
+      });
+      expect(result.details).toEqual({ ok: true, messageId: 802, subject: "Costs", attachments: 1 });
+    });
+
+    it("refuses a file outside the allowed directories and posts nothing", async () => {
+      const result = await tool.execute("call-28", {
+        bucketId: "100",
+        messageBoardId: "200",
+        subject: "Leak",
+        attachmentPaths: [path.join(outside, "secret.env")],
+      });
+
+      expect(result.details).toEqual({ ok: false, error: expect.stringContaining("outside the allowed attachment") });
+      expect(mockClient.attachments.create).not.toHaveBeenCalled();
+      expect(mockClient.messages.create).not.toHaveBeenCalled();
+    });
+
+    it("refuses a symlink inside the root that points outside it", async () => {
+      await symlink(path.join(outside, "secret.env"), path.join(root, "innocent.xlsx"));
+
+      const result = await tool.execute("call-29", {
+        bucketId: "100",
+        messageBoardId: "200",
+        subject: "Leak",
+        attachmentPaths: [path.join(root, "innocent.xlsx")],
+      });
+
+      expect(result.details).toEqual({ ok: false, error: expect.stringContaining("outside the allowed attachment") });
+      expect(mockClient.messages.create).not.toHaveBeenCalled();
+    });
+
+    it("refuses a path that climbs out of the root", async () => {
+      const result = await tool.execute("call-30", {
+        bucketId: "100",
+        messageBoardId: "200",
+        subject: "Leak",
+        attachmentPaths: [path.join(root, "..", path.basename(outside), "secret.env")],
+      });
+
+      expect(result.details).toEqual({ ok: false, error: expect.stringContaining("outside the allowed attachment") });
+    });
+
+    it("refuses every attachment when no roots are configured", async () => {
+      delete process.env.OPENCLAW_BASECAMP_ATTACHMENT_ROOTS;
+
+      const result = await tool.execute("call-31", {
+        bucketId: "100",
+        messageBoardId: "200",
+        subject: "Costs",
+        attachmentPaths: [path.join(root, "Infrastructure Cost 2026-10.xlsx")],
+      });
+
+      expect(result.details).toEqual({ ok: false, error: expect.stringContaining("Attachments are disabled") });
+      expect(mockClient.messages.create).not.toHaveBeenCalled();
+    });
   });
 });
 
